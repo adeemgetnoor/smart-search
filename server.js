@@ -29,7 +29,7 @@ const INTENT_MAPPING = {
     blog_topics: ['sleep', 'bedtime routine', 'insomnia']
   },
   digestion: {
-    keywords: ['digestion', 'stomach', 'verdauung', 'gut', 'bloating'],
+    keywords: ['digestion', 'stomach', 'verdauung', 'gut', 'bloating', 'recipe', 'rezept', 'food', 'essen'],
     product_tags: ['digestion', 'gut'],
     blog_topics: ['digestion', 'gut health', 'bloating']
   },
@@ -39,12 +39,12 @@ const INTENT_MAPPING = {
     blog_topics: ['stress management', 'relaxation', 'anxiety']
   },
   energy: {
-    keywords: ['energy', 'tired', 'fatigue', 'müde', 'vitality'],
+    keywords: ['energy', 'tired', 'fatigue', 'müde', 'vitality', 'recipe', 'rezept', 'food', 'essen'],
     product_tags: ['energy', 'vitality'],
     blog_topics: ['energy', 'fatigue', 'vitality']
   },
   immunity: {
-    keywords: ['immune', 'immunity', 'immun', 'defense', 'abwehr'],
+    keywords: ['immune', 'immunity', 'immun', 'defense', 'abwehr', 'recipe', 'rezept', 'food', 'essen'],
     product_tags: ['immune', 'immunity'],
     blog_topics: ['immune system', 'immunity']
   },
@@ -59,7 +59,7 @@ const INTENT_MAPPING = {
     blog_topics: ['joint health', 'arthritis', 'pain management']
   },
   weight: {
-    keywords: ['weight', 'gewicht', 'diet', 'metabolism'],
+    keywords: ['weight', 'gewicht', 'diet', 'metabolism', 'recipe', 'rezept', 'food', 'essen'],
     product_tags: ['weight', 'metabolism'],
     blog_topics: ['weight management', 'metabolism', 'diet']
   },
@@ -158,41 +158,31 @@ async function searchShopifyProducts(keywords, tags) {
     const allResults = [];
     const seen = new Set();
 
-    // Search by each keyword in title
-    for (const keyword of keywords) {
-      const url = buildShopifyUrl(`/products.json?title=${encodeURIComponent(keyword)}&limit=10`);
+    // Combine keywords and tags for search
+    const searchTerms = [...new Set([...keywords, ...tags])];
+
+    // Use Shopify Search API for full-text search (title, description, tags)
+    for (const term of searchTerms) {
+      const url = buildShopifyUrl(`/search.json?query=${encodeURIComponent(term)}&resource_type=PRODUCT&limit=10`);
       const response = await axios.get(url, {
         headers: { 'X-Shopify-Access-Token': SHOPIFY_CONFIG.accessToken }
       });
-      response.data.products.forEach(p => {
-        if (!seen.has(p.id)) {
-          seen.add(p.id);
-          allResults.push(p);
+      
+      response.data.results?.forEach(result => {
+        if (result.resource_type === 'PRODUCT' && !seen.has(result.id)) {
+          seen.add(result.id);
+          allResults.push(result);
         }
       });
     }
 
-    // Search by each tag
-    for (const tag of tags) {
-      const url = buildShopifyUrl(`/products.json?tag=${encodeURIComponent(tag)}&limit=10`);
-      const response = await axios.get(url, {
-        headers: { 'X-Shopify-Access-Token': SHOPIFY_CONFIG.accessToken }
-      });
-      response.data.products.forEach(p => {
-        if (!seen.has(p.id)) {
-          seen.add(p.id);
-          allResults.push(p);
-        }
-      });
-    }
-
-    return allResults.slice(0, 10).map(product => ({
-      id: product.id,
-      title: product.title,
-      handle: product.handle,
-      price: product.variants[0]?.price,
-      image: product.images[0]?.src,
-      tags: product.tags
+    return allResults.slice(0, 10).map(result => ({
+      id: result.id,
+      title: result.title,
+      handle: result.handle,
+      price: result.variants?.[0]?.price,
+      image: result.image?.src,
+      tags: result.tags
     }));
   } catch (error) {
     console.error('Shopify product search failed:', error.message);
@@ -206,29 +196,99 @@ async function searchShopifyBlogs(keywords) {
     const allResults = [];
     const seen = new Set();
 
+    // Use Shopify Search API for full-text search (title, content)
     for (const keyword of keywords) {
-      const url = buildShopifyUrl(`/articles.json?title=${encodeURIComponent(keyword)}&limit=5`);
+      const url = buildShopifyUrl(`/search.json?query=${encodeURIComponent(keyword)}&resource_type=ARTICLE&limit=5`);
       const response = await axios.get(url, {
         headers: { 'X-Shopify-Access-Token': SHOPIFY_CONFIG.accessToken }
       });
-      response.data.articles.forEach(a => {
-        if (!seen.has(a.id)) {
-          seen.add(a.id);
-          allResults.push(a);
+      
+      response.data.results?.forEach(result => {
+        if (result.resource_type === 'ARTICLE' && !seen.has(result.id)) {
+          seen.add(result.id);
+          allResults.push(result);
         }
       });
     }
 
-    return allResults.slice(0, 5).map(article => ({
-      id: article.id,
-      title: article.title,
-      handle: article.handle,
-      summary: article.summary_html,
-      published_at: article.published_at,
-      blog_id: article.blog_id
+    return allResults.slice(0, 5).map(result => ({
+      id: result.id,
+      title: result.title,
+      handle: result.handle,
+      summary: result.summary_html,
+      published_at: result.published_at,
+      blog_id: result.blog_id
     }));
   } catch (error) {
     console.error('Shopify blog search failed:', error.message);
+    return [];
+  }
+}
+
+// Shopify Recipe Search (using Pages)
+async function searchShopifyRecipes(keywords) {
+  try {
+    const allResults = [];
+    const seen = new Set();
+
+    // Use Shopify Search API for pages (recipes often stored as pages)
+    for (const keyword of keywords) {
+      const url = buildShopifyUrl(`/search.json?query=${encodeURIComponent(keyword)}&resource_type=PAGE&limit=5`);
+      const response = await axios.get(url, {
+        headers: { 'X-Shopify-Access-Token': SHOPIFY_CONFIG.accessToken }
+      });
+      
+      response.data.results?.forEach(result => {
+        if (result.resource_type === 'PAGE' && !seen.has(result.id)) {
+          seen.add(result.id);
+          allResults.push(result);
+        }
+      });
+    }
+
+    return allResults.slice(0, 5).map(result => ({
+      id: result.id,
+      title: result.title,
+      handle: result.handle,
+      body: result.body_html,
+      published_at: result.published_at
+    }));
+  } catch (error) {
+    console.error('Shopify recipe search failed:', error.message);
+    return [];
+  }
+}
+
+// Shopify Collection Search
+async function searchShopifyCollections(keywords) {
+  try {
+    const allResults = [];
+    const seen = new Set();
+
+    // Use Shopify Search API for collections
+    for (const keyword of keywords) {
+      const url = buildShopifyUrl(`/search.json?query=${encodeURIComponent(keyword)}&resource_type=COLLECTION&limit=5`);
+      const response = await axios.get(url, {
+        headers: { 'X-Shopify-Access-Token': SHOPIFY_CONFIG.accessToken }
+      });
+      
+      response.data.results?.forEach(result => {
+        if (result.resource_type === 'COLLECTION' && !seen.has(result.id)) {
+          seen.add(result.id);
+          allResults.push(result);
+        }
+      });
+    }
+
+    return allResults.slice(0, 5).map(result => ({
+      id: result.id,
+      title: result.title,
+      handle: result.handle,
+      description: result.body_html,
+      image: result.image?.src
+    }));
+  } catch (error) {
+    console.error('Shopify collection search failed:', error.message);
     return [];
   }
 }
@@ -289,7 +349,9 @@ app.post('/api/smart-search', async (req, res) => {
         explanation: "We couldn't determine a specific intent from your query. Try searching with keywords like 'sleep', 'digestion', or 'stress'.",
         results: {
           products: [],
-          articles: []
+          articles: [],
+          recipes: [],
+          collections: []
         }
       });
     }
@@ -297,11 +359,13 @@ app.post('/api/smart-search', async (req, res) => {
     const { intent, keywords, language } = intentResult;
     const intentConfig = INTENT_MAPPING[intent];
 
-    // Search Shopify — use intent keywords for blog search (single words match better as title filters)
-    const blogKeywords = [...new Set([...keywords, ...intentConfig.product_tags])];
-    const [products, articles] = await Promise.all([
+    // Search Shopify — use intent keywords for all searches
+    const searchKeywords = [...new Set([...keywords, ...intentConfig.product_tags])];
+    const [products, articles, recipes, collections] = await Promise.all([
       searchShopifyProducts(keywords, intentConfig.product_tags),
-      searchShopifyBlogs(blogKeywords)
+      searchShopifyBlogs(searchKeywords),
+      searchShopifyRecipes(searchKeywords),
+      searchShopifyCollections(searchKeywords)
     ]);
 
     // Generate response
@@ -312,7 +376,9 @@ app.post('/api/smart-search', async (req, res) => {
       explanation: generateExplanation(query, intent, language),
       results: {
         products,
-        articles
+        articles,
+        recipes,
+        collections
       }
     };
 
