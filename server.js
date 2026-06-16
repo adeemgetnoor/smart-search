@@ -73,14 +73,80 @@ const INTENT_MAPPING = {
 // Shopify API Configuration
 const SHOPIFY_CONFIG = {
   shopDomain: process.env.SHOPIFY_SHOP_DOMAIN,
-  accessToken: process.env.SHOPIFY_ACCESS_TOKEN,
-  apiVersion: process.env.SHOPIFY_API_VERSION || '2026-04'
+  clientId: process.env.SHOPIFY_CLIENT_ID,
+  clientSecret: process.env.SHOPIFY_CLIENT_SECRET,
+  redirectUri: process.env.SHOPIFY_REDIRECT_URI || 'http://localhost:3000/auth/callback',
+  apiVersion: process.env.SHOPIFY_API_VERSION || '2026-04',
+  accessToken: null // Will be set after OAuth
 };
+
+// In-memory access token storage (in production, use a database)
+let shopifyAccessToken = null;
 
 // Helper: Build Shopify Admin API URL
 function buildShopifyUrl(endpoint) {
   return `https://${SHOPIFY_CONFIG.shopDomain}.myshopify.com/admin/api/${SHOPIFY_CONFIG.apiVersion}${endpoint}`;
 }
+
+// OAuth: Generate authorization URL
+app.get('/auth/install', (req, res) => {
+  const { shop } = req.query;
+  
+  if (!shop) {
+    return res.status(400).json({ error: 'Shop parameter is required' });
+  }
+  
+  const scopes = ['read_products', 'read_content', 'read_product_listings'];
+  const state = Math.random().toString(36).substring(7);
+  
+  const authUrl = `https://${shop}.myshopify.com/admin/oauth/authorize?` +
+    `client_id=${SHOPIFY_CONFIG.clientId}&` +
+    `scope=${scopes.join(',')}&` +
+    `redirect_uri=${encodeURIComponent(SHOPIFY_CONFIG.redirectUri)}&` +
+    `state=${state}`;
+  
+  res.json({ authUrl });
+});
+
+// OAuth: Handle callback and exchange code for access token
+app.get('/auth/callback', async (req, res) => {
+  const { shop, code, state } = req.query;
+  
+  if (!shop || !code) {
+    return res.status(400).json({ error: 'Shop and code parameters are required' });
+  }
+  
+  try {
+    const tokenResponse = await axios.post(`https://${shop}.myshopify.com/admin/oauth/access_token`, {
+      client_id: SHOPIFY_CONFIG.clientId,
+      client_secret: SHOPIFY_CONFIG.clientSecret,
+      code
+    });
+    
+    shopifyAccessToken = tokenResponse.data.access_token;
+    SHOPIFY_CONFIG.accessToken = shopifyAccessToken;
+    
+    res.json({ 
+      success: true, 
+      message: 'Authentication successful',
+      shop
+    });
+  } catch (error) {
+    console.error('OAuth token exchange failed:', error.message);
+    res.status(500).json({ 
+      error: 'Failed to exchange authorization code for access token',
+      message: error.message 
+    });
+  }
+});
+
+// Check authentication status
+app.get('/auth/status', (req, res) => {
+  res.json({ 
+    authenticated: !!shopifyAccessToken,
+    shop: SHOPIFY_CONFIG.shopDomain
+  });
+});
 
 // Keyword-based Intent Extraction
 function extractIntentFromKeywords(query) {
@@ -154,6 +220,11 @@ async function extractIntentWithAI(query) {
 
 // Shopify Product Search
 async function searchShopifyProducts(keywords, tags) {
+  if (!shopifyAccessToken) {
+    console.error('Shopify access token not available');
+    return [];
+  }
+  
   try {
     const allResults = [];
     const seen = new Set();
@@ -165,7 +236,7 @@ async function searchShopifyProducts(keywords, tags) {
     for (const term of searchTerms) {
       const url = buildShopifyUrl(`/search.json?query=${encodeURIComponent(term)}&resource_type=PRODUCT&limit=10`);
       const response = await axios.get(url, {
-        headers: { 'X-Shopify-Access-Token': SHOPIFY_CONFIG.accessToken }
+        headers: { 'X-Shopify-Access-Token': shopifyAccessToken }
       });
       
       response.data.results?.forEach(result => {
@@ -192,6 +263,11 @@ async function searchShopifyProducts(keywords, tags) {
 
 // Shopify Blog Search
 async function searchShopifyBlogs(keywords) {
+  if (!shopifyAccessToken) {
+    console.error('Shopify access token not available');
+    return [];
+  }
+  
   try {
     const allResults = [];
     const seen = new Set();
@@ -200,7 +276,7 @@ async function searchShopifyBlogs(keywords) {
     for (const keyword of keywords) {
       const url = buildShopifyUrl(`/search.json?query=${encodeURIComponent(keyword)}&resource_type=ARTICLE&limit=5`);
       const response = await axios.get(url, {
-        headers: { 'X-Shopify-Access-Token': SHOPIFY_CONFIG.accessToken }
+        headers: { 'X-Shopify-Access-Token': shopifyAccessToken }
       });
       
       response.data.results?.forEach(result => {
@@ -227,6 +303,11 @@ async function searchShopifyBlogs(keywords) {
 
 // Shopify Recipe Search (using Pages)
 async function searchShopifyRecipes(keywords) {
+  if (!shopifyAccessToken) {
+    console.error('Shopify access token not available');
+    return [];
+  }
+  
   try {
     const allResults = [];
     const seen = new Set();
@@ -235,7 +316,7 @@ async function searchShopifyRecipes(keywords) {
     for (const keyword of keywords) {
       const url = buildShopifyUrl(`/search.json?query=${encodeURIComponent(keyword)}&resource_type=PAGE&limit=5`);
       const response = await axios.get(url, {
-        headers: { 'X-Shopify-Access-Token': SHOPIFY_CONFIG.accessToken }
+        headers: { 'X-Shopify-Access-Token': shopifyAccessToken }
       });
       
       response.data.results?.forEach(result => {
@@ -261,6 +342,11 @@ async function searchShopifyRecipes(keywords) {
 
 // Shopify Collection Search
 async function searchShopifyCollections(keywords) {
+  if (!shopifyAccessToken) {
+    console.error('Shopify access token not available');
+    return [];
+  }
+  
   try {
     const allResults = [];
     const seen = new Set();
@@ -269,7 +355,7 @@ async function searchShopifyCollections(keywords) {
     for (const keyword of keywords) {
       const url = buildShopifyUrl(`/search.json?query=${encodeURIComponent(keyword)}&resource_type=COLLECTION&limit=5`);
       const response = await axios.get(url, {
-        headers: { 'X-Shopify-Access-Token': SHOPIFY_CONFIG.accessToken }
+        headers: { 'X-Shopify-Access-Token': shopifyAccessToken }
       });
       
       response.data.results?.forEach(result => {
@@ -397,7 +483,8 @@ app.get('/health', (req, res) => {
   res.json({ 
     status: 'ok',
     openai: !!openai,
-    shopify: !!SHOPIFY_CONFIG.shopDomain
+    shopify: !!SHOPIFY_CONFIG.shopDomain,
+    shopifyAuthenticated: !!shopifyAccessToken
   });
 });
 
