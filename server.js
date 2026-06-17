@@ -3,6 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 const OpenAI = require('openai');
+const { kv } = require('@vercel/kv');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -70,18 +71,17 @@ const INTENT_MAPPING = {
   }
 };
 
-// Shopify API Configuration
 const SHOPIFY_CONFIG = {
   shopDomain: process.env.SHOPIFY_SHOP_DOMAIN,
   clientId: process.env.SHOPIFY_CLIENT_ID,
   clientSecret: process.env.SHOPIFY_CLIENT_SECRET,
   redirectUri: process.env.SHOPIFY_REDIRECT_URI || 'http://localhost:3000/auth/callback',
-  apiVersion: process.env.SHOPIFY_API_VERSION || '2026-04',
-  accessToken: null // Will be set after OAuth
+  apiVersion: process.env.SHOPIFY_API_VERSION || '2026-04'
 };
 
-// In-memory access token storage (in production, use a database)
-let shopifyAccessToken = null;
+const ACCESS_TOKEN_KEY = 'shopify_access_token';
+const getShopifyAccessToken = () => kv.get(ACCESS_TOKEN_KEY);
+const setShopifyAccessToken = (accessToken) => kv.set(ACCESS_TOKEN_KEY, accessToken);
 
 // Helper: Build Shopify Admin API URL
 function buildShopifyUrl(endpoint) {
@@ -123,8 +123,7 @@ app.get('/auth/callback', async (req, res) => {
       code
     });
     
-    shopifyAccessToken = tokenResponse.data.access_token;
-    SHOPIFY_CONFIG.accessToken = shopifyAccessToken;
+    await setShopifyAccessToken(tokenResponse.data.access_token);
     
     res.json({ 
       success: true, 
@@ -141,9 +140,10 @@ app.get('/auth/callback', async (req, res) => {
 });
 
 // Check authentication status
-app.get('/auth/status', (req, res) => {
+app.get('/auth/status', async (req, res) => {
+  const accessToken = await getShopifyAccessToken();
   res.json({ 
-    authenticated: !!shopifyAccessToken,
+    authenticated: !!accessToken,
     shop: SHOPIFY_CONFIG.shopDomain
   });
 });
@@ -220,23 +220,19 @@ async function extractIntentWithAI(query) {
 
 // Shopify Product Search
 async function searchShopifyProducts(keywords, tags) {
-  if (!shopifyAccessToken) {
-    console.error('Shopify access token not available');
-    return [];
-  }
-  
+  const accessToken = await getShopifyAccessToken();
+  accessToken || console.error('Shopify access token not available');
+
   try {
     const allResults = [];
     const seen = new Set();
 
-    // Combine keywords and tags for search
     const searchTerms = [...new Set([...keywords, ...tags])];
 
-    // Use Shopify Search API for full-text search (title, description, tags)
     for (const term of searchTerms) {
       const url = buildShopifyUrl(`/search.json?query=${encodeURIComponent(term)}&resource_type=PRODUCT&limit=10`);
       const response = await axios.get(url, {
-        headers: { 'X-Shopify-Access-Token': shopifyAccessToken }
+        headers: { 'X-Shopify-Access-Token': accessToken }
       });
       
       response.data.results?.forEach(result => {
@@ -263,20 +259,17 @@ async function searchShopifyProducts(keywords, tags) {
 
 // Shopify Blog Search
 async function searchShopifyBlogs(keywords) {
-  if (!shopifyAccessToken) {
-    console.error('Shopify access token not available');
-    return [];
-  }
-  
+  const accessToken = await getShopifyAccessToken();
+  accessToken || console.error('Shopify access token not available');
+
   try {
     const allResults = [];
     const seen = new Set();
 
-    // Use Shopify Search API for full-text search (title, content)
     for (const keyword of keywords) {
       const url = buildShopifyUrl(`/search.json?query=${encodeURIComponent(keyword)}&resource_type=ARTICLE&limit=5`);
       const response = await axios.get(url, {
-        headers: { 'X-Shopify-Access-Token': shopifyAccessToken }
+        headers: { 'X-Shopify-Access-Token': accessToken }
       });
       
       response.data.results?.forEach(result => {
@@ -303,20 +296,17 @@ async function searchShopifyBlogs(keywords) {
 
 // Shopify Recipe Search (using Pages)
 async function searchShopifyRecipes(keywords) {
-  if (!shopifyAccessToken) {
-    console.error('Shopify access token not available');
-    return [];
-  }
-  
+  const accessToken = await getShopifyAccessToken();
+  accessToken || console.error('Shopify access token not available');
+
   try {
     const allResults = [];
     const seen = new Set();
 
-    // Use Shopify Search API for pages (recipes often stored as pages)
     for (const keyword of keywords) {
       const url = buildShopifyUrl(`/search.json?query=${encodeURIComponent(keyword)}&resource_type=PAGE&limit=5`);
       const response = await axios.get(url, {
-        headers: { 'X-Shopify-Access-Token': shopifyAccessToken }
+        headers: { 'X-Shopify-Access-Token': accessToken }
       });
       
       response.data.results?.forEach(result => {
@@ -342,20 +332,17 @@ async function searchShopifyRecipes(keywords) {
 
 // Shopify Collection Search
 async function searchShopifyCollections(keywords) {
-  if (!shopifyAccessToken) {
-    console.error('Shopify access token not available');
-    return [];
-  }
-  
+  const accessToken = await getShopifyAccessToken();
+  accessToken || console.error('Shopify access token not available');
+
   try {
     const allResults = [];
     const seen = new Set();
 
-    // Use Shopify Search API for collections
     for (const keyword of keywords) {
       const url = buildShopifyUrl(`/search.json?query=${encodeURIComponent(keyword)}&resource_type=COLLECTION&limit=5`);
       const response = await axios.get(url, {
-        headers: { 'X-Shopify-Access-Token': shopifyAccessToken }
+        headers: { 'X-Shopify-Access-Token': accessToken }
       });
       
       response.data.results?.forEach(result => {
@@ -479,12 +466,13 @@ app.post('/api/smart-search', async (req, res) => {
 });
 
 // Health check endpoint
-app.get('/health', (req, res) => {
+app.get('/health', async (req, res) => {
+  const accessToken = await getShopifyAccessToken();
   res.json({ 
     status: 'ok',
     openai: !!openai,
     shopify: !!SHOPIFY_CONFIG.shopDomain,
-    shopifyAuthenticated: !!shopifyAccessToken
+    shopifyAuthenticated: !!accessToken
   });
 });
 
