@@ -80,8 +80,8 @@ const SHOPIFY_CONFIG = {
 };
 
 const ACCESS_TOKEN_KEY = 'shopify_access_token';
-const getShopifyAccessToken = () => kv.get(ACCESS_TOKEN_KEY);
-const setShopifyAccessToken = (accessToken) => kv.set(ACCESS_TOKEN_KEY, accessToken);
+const getShopifyAccessToken = () => kv.get(ACCESS_TOKEN_KEY).catch(() => null);
+const setShopifyAccessToken = (accessToken) => kv.set(ACCESS_TOKEN_KEY, accessToken).catch(() => null);
 
 // Helper: Build Shopify Admin API URL
 function buildShopifyUrl(endpoint) {
