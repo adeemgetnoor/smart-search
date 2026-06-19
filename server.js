@@ -3,370 +3,230 @@ const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 const OpenAI = require('openai');
-const { kv } = require('@vercel/kv');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware
+const axiosInstance = axios.create({
+  timeout: 15000,
+  httpAgent: new (require('http').Agent)({
+    keepAlive: true,
+    maxSockets: 50,
+    maxFreeSockets: 10,
+    timeout: 60000,
+    freeSocketTimeout: 30000
+  }),
+  httpsAgent: new (require('https').Agent)({
+    keepAlive: true,
+    maxSockets: 50,
+    maxFreeSockets: 10,
+    timeout: 60000,
+    freeSocketTimeout: 30000
+  })
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught Exception:', error);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
+const allowedOrigins = (process.env.ALLOWED_ORIGINS === '*') ? '*' : (process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : '*');
+
 app.use(cors({
-  origin: process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : '*'
+  origin: allowedOrigins,
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'ngrok-skip-browser-warning'],
+  preflightContinue: false,
+  optionsSuccessStatus: 204
 }));
+
 app.use(express.json());
 
-// Initialize OpenAI if API key is provided
-let openai = null;
-if (process.env.OPENAI_API_KEY) {
-  openai = new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY
+app.use((req, res, next) => {
+  res.setTimeout(30000, () => {
+    console.error(`Request timeout: ${req.method} ${req.url}`);
+    !res.headersSent && res.status(504).json({ error: 'Gateway timeout' });
   });
-}
+  next();
+});
 
-// Intent Mapping Configuration
+let openai = null;
+process.env.OPENAI_API_KEY && (openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY }));
+
+const SHOPIFY_STORE_URL = `https://${process.env.SHOPIFY_SHOP_DOMAIN}.myshopify.com`;
+
 const INTENT_MAPPING = {
   sleep: {
-    keywords: ['sleep', 'insomnia', 'schlaf', 'rest', 'night', 'bedtime'],
-    product_tags: ['sleep', 'rest', 'night'],
-    blog_topics: ['sleep', 'bedtime routine', 'insomnia']
+    keywords: ['sleep', 'insomnia', 'schlaf', 'rest', 'night', 'bedtime', 'schlafen', 'nacht'],
+    searchTerms: ['schlaf', 'sleep', 'vata nacht', 'einschlafen']
   },
   digestion: {
-    keywords: ['digestion', 'stomach', 'verdauung', 'gut', 'bloating', 'recipe', 'rezept', 'food', 'essen'],
-    product_tags: ['digestion', 'gut'],
-    blog_topics: ['digestion', 'gut health', 'bloating']
+    keywords: ['digestion', 'stomach', 'verdauung', 'gut', 'bloating', 'recipe', 'rezept', 'food', 'essen', 'magen'],
+    searchTerms: ['verdauung', 'digestion', 'magen', 'pitta']
   },
   stress: {
-    keywords: ['stress', 'calm', 'entspannung', 'anxiety', 'relax'],
-    product_tags: ['stress', 'calm', 'relax'],
-    blog_topics: ['stress management', 'relaxation', 'anxiety']
+    keywords: ['stress', 'calm', 'entspannung', 'anxiety', 'relax', 'ruhe', 'beruhigung'],
+    searchTerms: ['stress', 'entspannung', 'relax', 'ashwagandha']
   },
   energy: {
-    keywords: ['energy', 'tired', 'fatigue', 'müde', 'vitality', 'recipe', 'rezept', 'food', 'essen'],
-    product_tags: ['energy', 'vitality'],
-    blog_topics: ['energy', 'fatigue', 'vitality']
+    keywords: ['energy', 'tired', 'fatigue', 'müde', 'vitality', 'energie', 'müdigkeit'],
+    searchTerms: ['energie', 'energy', 'vitality', 'kapha']
   },
   immunity: {
-    keywords: ['immune', 'immunity', 'immun', 'defense', 'abwehr', 'recipe', 'rezept', 'food', 'essen'],
-    product_tags: ['immune', 'immunity'],
-    blog_topics: ['immune system', 'immunity']
+    keywords: ['immune', 'immunity', 'immun', 'defense', 'abwehr', 'immunsystem'],
+    searchTerms: ['immun', 'immunity', 'abwehr', 'amrit']
   },
   skin: {
-    keywords: ['skin', 'haut', 'acne', 'dermatitis'],
-    product_tags: ['skin', 'dermatology'],
-    blog_topics: ['skin care', 'acne', 'dermatitis']
+    keywords: ['skin', 'haut', 'acne', 'dermatitis', 'hautpflege'],
+    searchTerms: ['haut', 'skin', 'hautpflege']
   },
   joints: {
-    keywords: ['joint', 'gelenk', 'arthritis', 'pain', 'schmerz'],
-    product_tags: ['joint', 'arthritis'],
-    blog_topics: ['joint health', 'arthritis', 'pain management']
+    keywords: ['joint', 'gelenk', 'arthritis', 'pain', 'schmerz', 'gelenke'],
+    searchTerms: ['gelenk', 'joint', 'schmerz']
   },
   weight: {
-    keywords: ['weight', 'gewicht', 'diet', 'metabolism', 'recipe', 'rezept', 'food', 'essen'],
-    product_tags: ['weight', 'metabolism'],
-    blog_topics: ['weight management', 'metabolism', 'diet']
+    keywords: ['weight', 'gewicht', 'diet', 'metabolism', 'abnehmen', 'diät'],
+    searchTerms: ['gewicht', 'weight', 'abnehmen', 'kapha']
   },
   heart: {
-    keywords: ['heart', 'herz', 'cardio', 'blood pressure'],
-    product_tags: ['heart', 'cardio'],
-    blog_topics: ['heart health', 'blood pressure', 'cardiovascular']
+    keywords: ['heart', 'herz', 'cardio', 'blood pressure', 'blutdruck'],
+    searchTerms: ['herz', 'heart', 'blutdruck']
   }
 };
 
-const SHOPIFY_CONFIG = {
-  shopDomain: process.env.SHOPIFY_SHOP_DOMAIN,
-  clientId: process.env.SHOPIFY_CLIENT_ID,
-  clientSecret: process.env.SHOPIFY_CLIENT_SECRET,
-  redirectUri: process.env.SHOPIFY_REDIRECT_URI || 'http://localhost:3000/auth/callback',
-  apiVersion: process.env.SHOPIFY_API_VERSION || '2026-04'
-};
-
-const ACCESS_TOKEN_KEY = 'shopify_access_token';
-const getShopifyAccessToken = () => kv.get(ACCESS_TOKEN_KEY).catch(() => null);
-const setShopifyAccessToken = (accessToken) => kv.set(ACCESS_TOKEN_KEY, accessToken).catch(() => null);
-
-// Helper: Build Shopify Admin API URL
-function buildShopifyUrl(endpoint) {
-  return `https://${SHOPIFY_CONFIG.shopDomain}.myshopify.com/admin/api/${SHOPIFY_CONFIG.apiVersion}${endpoint}`;
-}
-
-// OAuth: Generate authorization URL
-app.get('/auth/install', (req, res) => {
-  const { shop } = req.query;
-  
-  if (!shop) {
-    return res.status(400).json({ error: 'Shop parameter is required' });
-  }
-  
-  const scopes = ['read_products', 'read_content', 'read_product_listings'];
-  const state = Math.random().toString(36).substring(7);
-  
-  const authUrl = `https://${shop}.myshopify.com/admin/oauth/authorize?` +
-    `client_id=${SHOPIFY_CONFIG.clientId}&` +
-    `scope=${scopes.join(',')}&` +
-    `redirect_uri=${encodeURIComponent(SHOPIFY_CONFIG.redirectUri)}&` +
-    `state=${state}`;
-  
-  res.json({ authUrl });
-});
-
-// OAuth: Handle callback and exchange code for access token
-app.get('/auth/callback', async (req, res) => {
-  const { shop, code, state } = req.query;
-  
-  if (!shop || !code) {
-    return res.status(400).json({ error: 'Shop and code parameters are required' });
-  }
-  
-  try {
-    const tokenResponse = await axios.post(`https://${shop}.myshopify.com/admin/oauth/access_token`, {
-      client_id: SHOPIFY_CONFIG.clientId,
-      client_secret: SHOPIFY_CONFIG.clientSecret,
-      code
-    });
-    
-    await setShopifyAccessToken(tokenResponse.data.access_token);
-    
-    res.json({ 
-      success: true, 
-      message: 'Authentication successful',
-      shop
-    });
-  } catch (error) {
-    console.error('OAuth token exchange failed:', error.message);
-    res.status(500).json({ 
-      error: 'Failed to exchange authorization code for access token',
-      message: error.message 
-    });
-  }
-});
-
-// Check authentication status
-app.get('/auth/status', async (req, res) => {
-  const accessToken = await getShopifyAccessToken();
-  res.json({ 
-    authenticated: !!accessToken,
-    shop: SHOPIFY_CONFIG.shopDomain
-  });
-});
-
-// Keyword-based Intent Extraction
 function extractIntentFromKeywords(query) {
   const lowerQuery = query.toLowerCase();
-  
-  for (const [intent, config] of Object.entries(INTENT_MAPPING)) {
-    for (const keyword of config.keywords) {
-      if (lowerQuery.includes(keyword)) {
-        return {
-          intent,
-          keywords: [keyword],
-          language: detectLanguage(query)
-        };
-      }
-    }
-  }
-  
-  return null;
+  return Object.entries(INTENT_MAPPING).reduce((found, [intent, config]) => {
+    return found || (config.keywords.find(keyword => lowerQuery.includes(keyword))
+      ? { intent, keywords: [config.keywords.find(keyword => lowerQuery.includes(keyword))], language: detectLanguage(query) }
+      : null);
+  }, null);
 }
 
-// Language Detection (simple)
 function detectLanguage(query) {
-  const germanIndicators = ['was', 'welche', 'wie', 'der', 'die', 'das', 'für'];
+  const germanIndicators = ['was', 'welche', 'wie', 'der', 'die', 'das', 'für', 'ich', 'mein', 'haben', 'kann', 'hilfe'];
   const lowerQuery = query.toLowerCase();
-  
-  if (germanIndicators.some(word => lowerQuery.includes(word))) {
-    return 'de';
-  }
-  return 'en';
+  return germanIndicators.some(word => lowerQuery.includes(word)) ? 'de' : 'en';
 }
 
-// AI-powered Intent Extraction
 async function extractIntentWithAI(query) {
-  if (!openai) {
-    console.log('OpenAI not configured, falling back to keyword extraction');
-    return extractIntentFromKeywords(query);
-  }
-
-  try {
-    const intents = Object.keys(INTENT_MAPPING).join(', ');
-    
-    const response = await openai.chat.completions.create({
-      model: 'gpt-3.5-turbo',
-      messages: [
-        {
-          role: 'system',
-          content: `You are a search intent classifier. Classify the user's query into one of these intents: ${intents}. Return JSON with keys: intent, keywords (array), language (en or de).`
-        },
-        {
-          role: 'user',
-          content: query
+  return openai
+    ? (async () => {
+        try {
+          const intents = Object.keys(INTENT_MAPPING).join(', ');
+          const response = await openai.chat.completions.create({
+            model: 'gpt-3.5-turbo',
+            messages: [
+              {
+                role: 'system',
+                content: `You are a search intent classifier for an Ayurveda health products store. Classify the user's query into one of these intents: ${intents}. Return JSON with keys: intent, keywords (array), language (en or de).`
+              },
+              { role: 'user', content: query }
+            ],
+            temperature: 0.3,
+            response_format: { type: 'json_object' }
+          });
+          const result = JSON.parse(response.choices[0].message.content);
+          return INTENT_MAPPING[result.intent] ? result : extractIntentFromKeywords(query);
+        } catch (error) {
+          console.error('AI intent extraction failed:', error.message);
+          return extractIntentFromKeywords(query);
         }
-      ],
-      temperature: 0.3,
-      response_format: { type: 'json_object' }
+      })()
+    : extractIntentFromKeywords(query);
+}
+
+function fetchSuggestResults(term) {
+  const url = `${SHOPIFY_STORE_URL}/search/suggest.json?q=${encodeURIComponent(term)}&resources[type]=product,article,page,collection&resources[limit]=10`;
+  console.log(`Fetching suggest results for term: ${term}`);
+  return axiosInstance.get(url, {
+    headers: { 'Accept': 'application/json' }
+  }).then(response => {
+    console.log(`Successfully fetched results for term: ${term}`);
+    return response.data?.resources?.results || {};
+  }).catch(error => {
+    console.error(`Error fetching results for term ${term}:`, error.message);
+    return {};
+  });
+}
+
+async function searchShopifyPublic(searchTerms) {
+  const seenProducts = new Set();
+  const seenArticles = new Set();
+  const seenPages = new Set();
+  const seenCollections = new Set();
+  const allProducts = [];
+  const allArticles = [];
+  const allPages = [];
+  const allCollections = [];
+
+  const limitedTerms = searchTerms.slice(0, 3);
+  const suggestResponses = await Promise.allSettled(limitedTerms.map(term => fetchSuggestResults(term)));
+
+  suggestResponses.forEach(response => {
+    (response.status !== 'fulfilled') && console.error('Suggest request failed:', response.reason?.message);
+    const results = (response.status === 'fulfilled') ? response.value : {};
+
+    (results.products || []).forEach(product => {
+      !seenProducts.has(product.id) && (seenProducts.add(product.id), allProducts.push({
+        id: product.id,
+        title: product.title,
+        handle: product.handle,
+        price: product.price,
+        price_min: product.price_min,
+        price_max: product.price_max,
+        compare_at_price_min: product.compare_at_price_min,
+        image: product.image,
+        url: product.url,
+        tags: product.tags,
+        type: product.type,
+        available: product.available
+      }));
     });
 
-    const result = JSON.parse(response.choices[0].message.content);
-    
-    // Validate intent exists in mapping
-    if (!INTENT_MAPPING[result.intent]) {
-      return extractIntentFromKeywords(query);
-    }
-    
-    return result;
-  } catch (error) {
-    console.error('AI intent extraction failed:', error.message);
-    return extractIntentFromKeywords(query);
-  }
+    (results.articles || []).forEach(article => {
+      !seenArticles.has(article.id) && (seenArticles.add(article.id), allArticles.push({
+        id: article.id,
+        title: article.title,
+        handle: article.handle,
+        summary: article.summary_html,
+        url: article.url,
+        published_at: article.published_at,
+        image: article.image,
+        blog_handle: article.blog_handle
+      }));
+    });
+
+    (results.pages || []).forEach(page => {
+      !seenPages.has(page.id) && (seenPages.add(page.id), allPages.push({
+        id: page.id,
+        title: page.title,
+        handle: page.handle,
+        url: page.url
+      }));
+    });
+
+    (results.collections || []).forEach(collection => {
+      !seenCollections.has(collection.id) && (seenCollections.add(collection.id), allCollections.push({
+        id: collection.id,
+        title: collection.title,
+        handle: collection.handle,
+        url: collection.url
+      }));
+    });
+  });
+
+  return {
+    products: allProducts.slice(0, 10),
+    articles: allArticles.slice(0, 5),
+    recipes: allPages.slice(0, 5),
+    collections: allCollections.slice(0, 5)
+  };
 }
 
-// Shopify Product Search
-async function searchShopifyProducts(keywords, tags) {
-  const accessToken = await getShopifyAccessToken();
-  accessToken || console.error('Shopify access token not available');
-
-  try {
-    const allResults = [];
-    const seen = new Set();
-
-    const searchTerms = [...new Set([...keywords, ...tags])];
-
-    for (const term of searchTerms) {
-      const url = buildShopifyUrl(`/search.json?query=${encodeURIComponent(term)}&resource_type=PRODUCT&limit=10`);
-      const response = await axios.get(url, {
-        headers: { 'X-Shopify-Access-Token': accessToken }
-      });
-      
-      response.data.results?.forEach(result => {
-        if (result.resource_type === 'PRODUCT' && !seen.has(result.id)) {
-          seen.add(result.id);
-          allResults.push(result);
-        }
-      });
-    }
-
-    return allResults.slice(0, 10).map(result => ({
-      id: result.id,
-      title: result.title,
-      handle: result.handle,
-      price: result.variants?.[0]?.price,
-      image: result.image?.src,
-      tags: result.tags
-    }));
-  } catch (error) {
-    console.error('Shopify product search failed:', error.message);
-    return [];
-  }
-}
-
-// Shopify Blog Search
-async function searchShopifyBlogs(keywords) {
-  const accessToken = await getShopifyAccessToken();
-  accessToken || console.error('Shopify access token not available');
-
-  try {
-    const allResults = [];
-    const seen = new Set();
-
-    for (const keyword of keywords) {
-      const url = buildShopifyUrl(`/search.json?query=${encodeURIComponent(keyword)}&resource_type=ARTICLE&limit=5`);
-      const response = await axios.get(url, {
-        headers: { 'X-Shopify-Access-Token': accessToken }
-      });
-      
-      response.data.results?.forEach(result => {
-        if (result.resource_type === 'ARTICLE' && !seen.has(result.id)) {
-          seen.add(result.id);
-          allResults.push(result);
-        }
-      });
-    }
-
-    return allResults.slice(0, 5).map(result => ({
-      id: result.id,
-      title: result.title,
-      handle: result.handle,
-      summary: result.summary_html,
-      published_at: result.published_at,
-      blog_id: result.blog_id
-    }));
-  } catch (error) {
-    console.error('Shopify blog search failed:', error.message);
-    return [];
-  }
-}
-
-// Shopify Recipe Search (using Pages)
-async function searchShopifyRecipes(keywords) {
-  const accessToken = await getShopifyAccessToken();
-  accessToken || console.error('Shopify access token not available');
-
-  try {
-    const allResults = [];
-    const seen = new Set();
-
-    for (const keyword of keywords) {
-      const url = buildShopifyUrl(`/search.json?query=${encodeURIComponent(keyword)}&resource_type=PAGE&limit=5`);
-      const response = await axios.get(url, {
-        headers: { 'X-Shopify-Access-Token': accessToken }
-      });
-      
-      response.data.results?.forEach(result => {
-        if (result.resource_type === 'PAGE' && !seen.has(result.id)) {
-          seen.add(result.id);
-          allResults.push(result);
-        }
-      });
-    }
-
-    return allResults.slice(0, 5).map(result => ({
-      id: result.id,
-      title: result.title,
-      handle: result.handle,
-      body: result.body_html,
-      published_at: result.published_at
-    }));
-  } catch (error) {
-    console.error('Shopify recipe search failed:', error.message);
-    return [];
-  }
-}
-
-// Shopify Collection Search
-async function searchShopifyCollections(keywords) {
-  const accessToken = await getShopifyAccessToken();
-  accessToken || console.error('Shopify access token not available');
-
-  try {
-    const allResults = [];
-    const seen = new Set();
-
-    for (const keyword of keywords) {
-      const url = buildShopifyUrl(`/search.json?query=${encodeURIComponent(keyword)}&resource_type=COLLECTION&limit=5`);
-      const response = await axios.get(url, {
-        headers: { 'X-Shopify-Access-Token': accessToken }
-      });
-      
-      response.data.results?.forEach(result => {
-        if (result.resource_type === 'COLLECTION' && !seen.has(result.id)) {
-          seen.add(result.id);
-          allResults.push(result);
-        }
-      });
-    }
-
-    return allResults.slice(0, 5).map(result => ({
-      id: result.id,
-      title: result.title,
-      handle: result.handle,
-      description: result.body_html,
-      image: result.image?.src
-    }));
-  } catch (error) {
-    console.error('Shopify collection search failed:', error.message);
-    return [];
-  }
-}
-
-// Generate Explanation
 function generateExplanation(query, intent, language) {
   const explanations = {
     en: {
@@ -396,89 +256,56 @@ function generateExplanation(query, intent, language) {
   return explanations[language]?.[intent] || explanations.en[intent] || "We've found relevant products and articles for you.";
 }
 
-// Smart Search Endpoint
 app.post('/api/smart-search', async (req, res) => {
+  const startTime = Date.now();
   try {
     const { query, useAI = true } = req.body;
+    console.log(`Smart search request for query: ${query}`);
 
-    if (!query) {
-      return res.status(400).json({ error: 'Query is required' });
-    }
+    return !query
+      ? res.status(400).json({ error: 'Query is required' })
+      : await (async () => {
+          const intentResult = await ((useAI && openai) ? extractIntentWithAI(query) : Promise.resolve(extractIntentFromKeywords(query)));
 
-    // Extract intent
-    let intentResult;
-    if (useAI && openai) {
-      intentResult = await extractIntentWithAI(query);
-    } else {
-      intentResult = extractIntentFromKeywords(query);
-    }
+          const searchTerms = [...new Set([
+            query,
+            ...(intentResult ? (INTENT_MAPPING[intentResult.intent]?.searchTerms || []) : []),
+            ...(intentResult?.keywords || [])
+          ])];
 
-    // If no intent detected, return empty results
-    if (!intentResult) {
-      return res.json({
-        query,
-        intent: null,
-        language: detectLanguage(query),
-        explanation: "We couldn't determine a specific intent from your query. Try searching with keywords like 'sleep', 'digestion', or 'stress'.",
-        results: {
-          products: [],
-          articles: [],
-          recipes: [],
-          collections: []
-        }
-      });
-    }
+          const results = await searchShopifyPublic(searchTerms);
 
-    const { intent, keywords, language } = intentResult;
-    const intentConfig = INTENT_MAPPING[intent];
+          const intent = intentResult?.intent || null;
+          const language = intentResult?.language || detectLanguage(query);
+          const totalResults = Object.values(results).reduce((sum, arr) => sum + arr.length, 0);
+          const explanation = intent
+            ? generateExplanation(query, intent, language)
+            : (totalResults > 0
+              ? "Hier sind die Suchergebnisse für Ihre Anfrage."
+              : "Keine Ergebnisse gefunden. Versuchen Sie es mit anderen Suchbegriffen.");
 
-    // Search Shopify — use intent keywords for all searches
-    const searchKeywords = [...new Set([...keywords, ...intentConfig.product_tags])];
-    const [products, articles, recipes, collections] = await Promise.all([
-      searchShopifyProducts(keywords, intentConfig.product_tags),
-      searchShopifyBlogs(searchKeywords),
-      searchShopifyRecipes(searchKeywords),
-      searchShopifyCollections(searchKeywords)
-    ]);
-
-    // Generate response
-    const response = {
-      query,
-      intent,
-      language,
-      explanation: generateExplanation(query, intent, language),
-      results: {
-        products,
-        articles,
-        recipes,
-        collections
-      }
-    };
-
-    res.json(response);
+          const duration = Date.now() - startTime;
+          console.log(`Smart search completed in ${duration}ms for query: ${query}`);
+          return res.json({ query, intent, language, explanation, results });
+        })();
   } catch (error) {
-    console.error('Smart search error:', error);
-    res.status(500).json({ 
-      error: 'Internal server error',
-      message: error.message 
-    });
+    const duration = Date.now() - startTime;
+    console.error(`Smart search error after ${duration}ms:`, error);
+    res.status(500).json({ error: 'Internal server error', message: error.message });
   }
 });
 
-// Health check endpoint
-app.get('/health', async (req, res) => {
-  const accessToken = await getShopifyAccessToken();
-  res.json({ 
+app.get('/health', (req, res) => {
+  res.json({
     status: 'ok',
     openai: !!openai,
-    shopify: !!SHOPIFY_CONFIG.shopDomain,
-    shopifyAuthenticated: !!accessToken
+    shopify: !!process.env.SHOPIFY_SHOP_DOMAIN,
+    storeUrl: SHOPIFY_STORE_URL
   });
 });
 
-// Start server
 app.listen(PORT, () => {
   console.log(`Smart Search server running on port ${PORT}`);
+  console.log(`Store: ${SHOPIFY_STORE_URL}`);
   console.log(`OpenAI: ${openai ? 'configured' : 'not configured'}`);
-  console.log(`Shopify: ${SHOPIFY_CONFIG.shopDomain ? 'configured' : 'not configured'}`);
 });
