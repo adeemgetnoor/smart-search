@@ -38,10 +38,18 @@ const allowedOrigins = (process.env.ALLOWED_ORIGINS === '*') ? '*' : (process.en
 app.use(cors({
   origin: allowedOrigins,
   methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'ngrok-skip-browser-warning'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Accept'],
   preflightContinue: false,
   optionsSuccessStatus: 204
 }));
+
+app.options('*', (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept');
+  res.setHeader('Access-Control-Max-Age', '86400');
+  res.status(204).end();
+});
 
 app.use(express.json());
 
@@ -295,6 +303,11 @@ app.post('/api/smart-search', async (req, res) => {
   }
 });
 
+app.get('/ping', (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.status(200).json({ alive: true, timestamp: Date.now() });
+});
+
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
@@ -309,3 +322,5 @@ app.listen(PORT, () => {
   console.log(`Store: ${SHOPIFY_STORE_URL}`);
   console.log(`OpenAI: ${openai ? 'configured' : 'not configured'}`);
 });
+
+module.exports = app;
